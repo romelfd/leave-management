@@ -1,0 +1,79 @@
+name: Deploy
+
+# Runs only after a merge to main — CI above already gated the PR. This is a
+# template: it needs real AWS resources and GitHub secrets to actually run.
+# Treat it as the shape of a deployment, not a copy-paste-and-go pipeline.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-frontend:
+    name: Build & sync frontend to S3
+    runs-on: ubuntu-latest
+    # A GitHub "environment" here lets you require manual approval before prod
+    # deploys — Settings > Environments > add required reviewers. That's the
+    # release-discipline piece the JD is asking about.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install & build
+        working-directory: frontend
+        env:
+          STATIC_EXPORT: 'true'
+          NEXT_PUBLIC_API_URL: ${{ secrets.API_BASE_URL }} # e.g. https://api.yourapp.com/api
+        run: |
+          npm install
+          npm run build
+      # This app has no server-side data fetching (getServerSideProps), so a
+      # static export to S3+CloudFront is valid. If SSR or API routes get
+      # added later, this step no longer applies — see the note at the
+      # bottom of this file for the SSR alternative.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Sync to S3
+        working-directory: frontend
+        run: aws s3 sync out/ s3://${{ secrets.S3_BUCKET }} --delete
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+  deploy-backend:
+    name: Deploy API to EC2
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      # SSHes into an EC2 instance (behind the ALB, per AWS_NOTES.md), pulls
+      # the latest main, reinstalls, and restarts via pm2. For a fleet behind
+      # an Auto Scaling Group instead of one instance, this step would be
+      # replaced by CodeDeploy or a fresh AMI + ASG instance refresh — SSHing
+      # into a single box doesn't scale past a couple of instances.
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /var/www/leave-management/backend
+            git pull origin main
+            npm install --production
+            pm2 restart leave-management-api
+
+# --- SSR / API-route alternative (not used by this exercise) ---
+# If the frontend needed server-side rendering or Next.js API routes, S3
+# static hosting wouldn't work — S3 only serves static files. The frontend
+# would instead run on EC2/ECS alongside the backend (or on a service like
+# ECS Fargate), fronted by the same ALB, instead of S3 + CloudFront.

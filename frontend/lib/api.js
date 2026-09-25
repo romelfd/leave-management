@@ -1,4 +1,8 @@
-const BASE_URL = '/api';
+// In dev, next.config.js proxies /api/* to the local backend, so a relative
+// path works. A static S3 export has no server to do that rewrite, so
+// production needs an absolute base including the /api prefix, e.g.
+// NEXT_PUBLIC_API_URL=https://api.yourapp.com/api set at build time.
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {
